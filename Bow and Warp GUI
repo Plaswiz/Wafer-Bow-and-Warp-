@@ -1,0 +1,155 @@
+import os
+import re
+import pandas as pd
+import tkinter as tk
+from tkinter import filedialog, messagebox, Button, Label, Frame, Listbox, Scrollbar
+from scipy.interpolate import griddata
+import numpy as np
+import plotly.graph_objects as go
+
+# Analysis Functions
+def fit_plane(points, values):
+    A = np.c_[points[:, 0], points[:, 1], np.ones(points.shape[0])]
+    C, _, _, _ = np.linalg.lstsq(A, values, rcond=None)
+    return C
+
+def remove_plane(points, values, coefficients):
+    return values - (coefficients[0] * points[:, 0] + coefficients[1] * points[:, 1] + coefficients[2])
+
+def sieve(topfolder: str, pattern: str) -> list:
+    all_files = []
+    for base, _, files in os.walk(topfolder):
+        txtfiles = filter(lambda x: re.search(pattern, x), files)
+        all_files += [os.path.join(base, eachtxt) for eachtxt in txtfiles]
+    return all_files
+
+def read_txt_files(file_list, lot, wafer):
+    data_list = []
+    for file_path in file_list:
+        if 'ReferenceChipSingleBeam' not in file_path and file_path.endswith('.txt'):
+            try:
+                # Read the file and extract necessary columns
+                data = pd.read_csv(file_path, delimiter=',', header=0, skipinitialspace=True)
+                if all(col in data.columns for col in ['X', 'Y', 'Z']):
+                    subset = data[['X', 'Y', 'Z']].copy()
+                    subset['Lot'] = lot
+                    subset['Wafer'] = wafer
+                    data_list.append(subset)
+                else:
+                    print(f"File {file_path} does not have required columns ['X', 'Y', 'Z'].")
+            except Exception as e:
+                print(f"Error reading {file_path}: {e}")
+    if data_list:
+        combined_data = pd.concat(data_list, ignore_index=True)
+    else:
+        combined_data = pd.DataFrame()
+    return combined_data
+
+def analyze_data(data):
+    if data.empty:
+        return None
+    points = data[['X', 'Y']].values
+    values = data['Z'].values
+    coefficients = fit_plane(points, values)
+    corrected_values = remove_plane(points, values, coefficients)
+    std_dev = np.std(values)
+    bow, warp = calculate_bow_warp(points, corrected_values)
+    return std_dev, bow, warp, points, corrected_values
+
+def calculate_bow_warp(points, corrected_values):
+    center_value = griddata(points, corrected_values, (np.array([0]), np.array([0])), method='linear')[0]
+    bow = abs(center_value - np.mean(corrected_values)) * 1000  # Convert to microns
+    warp = np.ptp(corrected_values) * 1000  # Peak-to-peak range in microns
+    return round(bow, 1), round(warp, 1)
+
+def save_combined_data(data, filename):
+    data.to_csv(filename, index=False)
+    print(f"Combined data saved as {filename}")
+
+def save_results(results, filename):
+    df = pd.DataFrame(results)
+    df.to_csv(filename, index=False)
+    print(f"Results saved as {filename}")
+
+# GUI for Multi-Folder Selection
+class FolderSelectorApp:
+    def __init__(self, root):
+        self.root = root
+        self.selected_folders = []
+        self.create_widgets()
+
+    def create_widgets(self):
+        self.label = Label(self.root, text="Selected Folders:")
+        self.label.pack()
+        self.listbox_frame = Frame(self.root)
+        self.listbox_frame.pack()
+        self.listbox = Listbox(self.listbox_frame, width=50, height=15)
+        self.listbox.pack(side="left", fill="both", expand=True)
+        self.scrollbar = Scrollbar(self.listbox_frame, orient="vertical", command=self.listbox.yview)
+        self.scrollbar.pack(side="right", fill="y")
+        self.listbox.config(yscrollcommand=self.scrollbar.set)
+        self.add_button = Button(self.root, text="Add Folder", command=self.add_folder)
+        self.add_button.pack()
+        self.remove_button = Button(self.root, text="Remove Selected", command=self.remove_folder)
+        self.remove_button.pack()
+        self.analyze_button = Button(self.root, text="Run Analysis", command=self.run_analysis)
+        self.analyze_button.pack()
+
+    def add_folder(self):
+        folder = filedialog.askdirectory(mustexist=True, title="Select Folder")
+        if folder and folder not in self.selected_folders:
+            self.selected_folders.append(folder)
+            self.listbox.insert("end", folder)
+
+    def remove_folder(self):
+        selected_indices = self.listbox.curselection()
+        for index in reversed(selected_indices):
+            self.selected_folders.pop(index)
+            self.listbox.delete(index)
+
+    def run_analysis(self):
+        self.root.destroy()
+
+def run_gui():
+    root = tk.Tk()
+    root.title("Select Folders for Analysis")
+    app = FolderSelectorApp(root)
+    root.mainloop()
+    return app.selected_folders
+
+# Main Application Logic
+def main():
+    print("Starting application...")
+    selected_folders = run_gui()
+    if not selected_folders:
+        print("No folders selected. Exiting.")
+        return
+    all_combined_data = []
+    results = []
+    for folder in selected_folders:
+        lot = os.path.basename(folder)
+        for i in range(1, 26):
+            wafer_folder = f'CarrierAtPort1/CarrierAtPort1.{i:02d}/{i}'
+            wafer_path = os.path.join(folder, wafer_folder)
+            wafer = f'Wafer_{i}'
+            file_list = sieve(wafer_path, 'Run0001')
+            combined_data = read_txt_files(file_list, lot, wafer)
+            if not combined_data.empty:
+                all_combined_data.append(combined_data)
+                std_dev, bow, warp, points, corrected_values = analyze_data(combined_data)
+                results.append({
+                    'Lot': lot,
+                    'Wafer': wafer,
+                    'Std Dev': std_dev,
+                    'Bow (µm)': bow,
+                    'Warp (µm)': warp
+                })
+    if all_combined_data:
+        all_combined_data_df = pd.concat(all_combined_data, ignore_index=True)
+        save_combined_data(all_combined_data_df, 'combined_data.csv')
+    if results:
+        save_results(results, 'analysis_results.csv')
+
+if __name__ == "__main__":
+    main()
+    input("Press Enter to exit...")
