@@ -1,0 +1,102 @@
+import os
+import numpy as np
+import pandas as pd
+import tkinter as tk
+from tkinter import filedialog
+import plotly.graph_objects as go
+from scipy.interpolate import griddata
+import webbrowser
+
+# Function to fit a plane
+def fit_plane(points, values):
+    A = np.c_[points[:, 0], points[:, 1], np.ones(points.shape[0])]
+    C, _, _, _ = np.linalg.lstsq(A, values, rcond=None)
+    return C
+
+# Function to remove plane
+def remove_plane(points, values, coefficients):
+    return values - (coefficients[0] * points[:, 0] + coefficients[1] * points[:, 1] + coefficients[2])
+
+# Function to calculate Bow and Warp
+def calculate_bow_and_warp(points, corrected_values):
+    center_value = griddata(points, corrected_values, (0, 0), method='linear')
+    bow = abs(center_value - np.mean(corrected_values)) * 1000  # Convert to microns
+    warp = np.ptp(corrected_values) * 1000  # Peak-to-peak in microns
+    return round(bow, 1), round(warp, 1)
+
+# Function to create HTML heatmap with proportional scaling
+def create_html_heatmap(points, corrected_values, bow, warp, output_file):
+    # Create grid for heatmap
+    grid_x, grid_y = np.mgrid[
+        np.min(points[:, 0]):np.max(points[:, 0]):200j,
+        np.min(points[:, 1]):np.max(points[:, 1]):200j
+    ]
+    grid_z = griddata(points, corrected_values, (grid_x, grid_y), method='cubic')
+
+    # Plot with Plotly
+    fig = go.Figure(data=go.Heatmap(
+        z=grid_z,
+        x=np.linspace(np.min(points[:, 0]), np.max(points[:, 0]), grid_x.shape[0]),
+        y=np.linspace(np.min(points[:, 1]), np.max(points[:, 1]), grid_y.shape[1]),
+        colorscale='Viridis',
+        colorbar=dict(title='Corrected Z (Height)'),
+    ))
+
+    # Add metadata to the title
+    fig.update_layout(
+        title=f'Wafer Heatmap<br>Bow: {bow} µm | Warp: {warp} µm',
+        xaxis_title="X Coordinate",
+        yaxis_title="Y Coordinate",
+        autosize=True,
+        xaxis=dict(scaleanchor="y", scaleratio=1),  # Enforce equal aspect ratio
+        yaxis=dict(scaleanchor="x", scaleratio=1),  # Enforce equal aspect ratio
+    )
+
+    # Save the plot as an HTML file
+    fig.write_html(output_file)
+    print(f"Heatmap saved to {output_file}. Opening in web browser...")
+
+    # Open the HTML file in the default web browser
+    webbrowser.open('file://' + os.path.abspath(output_file))
+
+# Main function to process the wafer map
+def process_wafer_map():
+    # Select the file
+    root = tk.Tk()
+    root.withdraw()
+    file_path = filedialog.askopenfilename(title="Select Wafer Data File", filetypes=[("Text Files", "*.txt")])
+    
+    if not file_path:
+        print("No file selected. Exiting.")
+        return
+
+    # Read the wafer data
+    try:
+        data = pd.read_csv(file_path, delimiter=',', header=0, skipinitialspace=True)
+        print("File loaded successfully.")
+    except Exception as e:
+        print(f"Error loading file: {e}")
+        return
+
+    # Ensure required columns exist
+    if not {'X', 'Y', 'Z'}.issubset(data.columns):
+        print("The file does not contain the required columns: X, Y, Z.")
+        return
+
+    points = data[['X', 'Y']].values
+    values = data['Z'].values
+
+    # Fit and remove the plane
+    coefficients = fit_plane(points, values)
+    corrected_values = remove_plane(points, values, coefficients)
+
+    # Calculate Bow and Warp
+    bow, warp = calculate_bow_and_warp(points, corrected_values)
+
+    # Create the HTML heatmap
+    output_file = "wafer_heatmap.html"
+    create_html_heatmap(points, corrected_values, bow, warp, output_file)
+
+# Run the main function
+if __name__ == "__main__":
+    process_wafer_map()
