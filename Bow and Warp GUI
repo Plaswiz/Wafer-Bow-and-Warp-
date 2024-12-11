@@ -3,19 +3,37 @@ import re
 import pandas as pd
 import tkinter as tk
 from tkinter import filedialog, messagebox, Button, Label, Frame, Listbox, Scrollbar
+from tkinter import ttk
 from scipy.interpolate import griddata
 import numpy as np
-import plotly.graph_objects as go
+import logging
+from openpyxl import Workbook, load_workbook
+from openpyxl.formatting.rule import ColorScaleRule
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Analysis Functions
 def fit_plane(points, values):
-    A = np.c_[points[:, 0], points[:, 1], np.ones(points.shape[0])]
-    C, _, _, _ = np.linalg.lstsq(A, values, rcond=None)
+    radius = np.sqrt(points[:, 0]**2 + points[:, 1]**2)
+    outer_points = points[radius > 80]
+    outer_values = values[radius > 80]
+    if len(outer_points) < 3:
+        logging.error("Not enough outer points to fit a plane.")
+        raise ValueError("Insufficient outer points for plane fitting.")
+    A = np.c_[outer_points[:, 0], outer_points[:, 1], np.ones(outer_points.shape[0])]
+    C, _, _, _ = np.linalg.lstsq(A, outer_values, rcond=None)
     return C
 
 def remove_plane(points, values, coefficients):
     return values - (coefficients[0] * points[:, 0] + coefficients[1] * points[:, 1] + coefficients[2])
 
+def calculate_bow_warp(points, corrected_values):
+    center_value = griddata(points, corrected_values, (np.array([0]), np.array([0])), method='linear')[0]
+    bow = (np.mean(corrected_values) - center_value) * 1000  # No abs, subtract center value from mean
+    warp = np.ptp(corrected_values) * 1000  # Peak-to-peak range in microns
+    return round(bow, 1), round(warp, 1)
+
+# File handling and data analysis
 def sieve(topfolder: str, pattern: str) -> list:
     all_files = []
     for base, _, files in os.walk(topfolder):
@@ -28,7 +46,6 @@ def read_txt_files(file_list, lot, wafer):
     for file_path in file_list:
         if 'ReferenceChipSingleBeam' not in file_path and file_path.endswith('.txt'):
             try:
-                # Read the file and extract necessary columns
                 data = pd.read_csv(file_path, delimiter=',', header=0, skipinitialspace=True)
                 if all(col in data.columns for col in ['X', 'Y', 'Z']):
                     subset = data[['X', 'Y', 'Z']].copy()
@@ -36,14 +53,10 @@ def read_txt_files(file_list, lot, wafer):
                     subset['Wafer'] = wafer
                     data_list.append(subset)
                 else:
-                    print(f"File {file_path} does not have required columns ['X', 'Y', 'Z'].")
+                    logging.warning(f"File {file_path} does not have required columns ['X', 'Y', 'Z'].")
             except Exception as e:
-                print(f"Error reading {file_path}: {e}")
-    if data_list:
-        combined_data = pd.concat(data_list, ignore_index=True)
-    else:
-        combined_data = pd.DataFrame()
-    return combined_data
+                logging.error(f"Error reading {file_path}: {e}")
+    return pd.concat(data_list, ignore_index=True) if data_list else pd.DataFrame()
 
 def analyze_data(data):
     if data.empty:
@@ -54,22 +67,57 @@ def analyze_data(data):
     corrected_values = remove_plane(points, values, coefficients)
     std_dev = np.std(values)
     bow, warp = calculate_bow_warp(points, corrected_values)
-    return std_dev, bow, warp, points, corrected_values
+    return std_dev, bow, warp
 
-def calculate_bow_warp(points, corrected_values):
-    center_value = griddata(points, corrected_values, (np.array([0]), np.array([0])), method='linear')[0]
-    bow = abs(center_value - np.mean(corrected_values)) * 1000  # Convert to microns
-    warp = np.ptp(corrected_values) * 1000  # Peak-to-peak range in microns
-    return round(bow, 1), round(warp, 1)
+def save_combined_data(data):
+    filename = filedialog.asksaveasfilename(title="Save Combined Data", defaultextension=".csv", filetypes=[("CSV Files", "*.csv")])
+    if filename:
+        data.to_csv(filename, index=False, encoding='utf-8-sig')  # Ensure proper encoding
+        logging.info(f"Combined data saved as {filename}")
 
-def save_combined_data(data, filename):
-    data.to_csv(filename, index=False)
-    print(f"Combined data saved as {filename}")
+def save_results(results):
+    filename = filedialog.asksaveasfilename(title="Save Analysis Results", defaultextension=".xlsx", filetypes=[("Excel Files", "*.xlsx")])
+    if filename:
+        df = pd.DataFrame(results)
+        df.to_excel(filename, index=False, engine='openpyxl')
+        wb = load_workbook(filename)
+        ws = wb.active
 
-def save_results(results, filename):
-    df = pd.DataFrame(results)
-    df.to_csv(filename, index=False)
-    print(f"Results saved as {filename}")
+        # Apply conditional formatting to Bow and Warp columns
+        bow_col = None
+        warp_col = None
+        for col in ws.iter_cols(1, ws.max_column):
+            if col[0].value == "Bow (µm)":
+                bow_col = col[0].column_letter
+            elif col[0].value == "Warp (µm)":
+                warp_col = col[0].column_letter
+
+        # Conditional formatting for Bow: Handle both high positive and high negative
+        if bow_col:
+            max_bow = max(df["Bow (µm)"].abs())  # Highest absolute value for scaling
+            ws.conditional_formatting.add(
+                f"{bow_col}2:{bow_col}{ws.max_row}",
+                ColorScaleRule(
+                    start_type="num", start_value=-max_bow, start_color="F8696B",  # Red for high negative
+                    mid_type="num", mid_value=0, mid_color="63BE7B",              # Green for zero
+                    end_type="num", end_value=max_bow, end_color="F8696B"        # Red for high positive
+                )
+            )
+
+        # Conditional formatting for Warp: High positive to zero
+        if warp_col:
+            max_warp = max(df["Warp (µm)"])  # Highest positive value for scaling
+            ws.conditional_formatting.add(
+                f"{warp_col}2:{warp_col}{ws.max_row}",
+                ColorScaleRule(
+                    start_type="num", start_value=0, start_color="63BE7B",        # Green for zero
+                    mid_type="percentile", mid_value=50, mid_color="FFFFBF",     # Yellow for mid-range
+                    end_type="num", end_value=max_warp, end_color="F8696B"       # Red for high positive
+                )
+            )
+
+        wb.save(filename)
+        logging.info(f"Results saved as {filename}")
 
 # GUI for Multi-Folder Selection
 class FolderSelectorApp:
@@ -94,6 +142,10 @@ class FolderSelectorApp:
         self.remove_button.pack()
         self.analyze_button = Button(self.root, text="Run Analysis", command=self.run_analysis)
         self.analyze_button.pack()
+        self.progress_label = Label(self.root, text="Progress: 0%")
+        self.progress_label.pack()
+        self.progress_bar = ttk.Progressbar(self.root, orient="horizontal", length=300, mode="determinate")
+        self.progress_bar.pack()
 
     def add_folder(self):
         folder = filedialog.askdirectory(mustexist=True, title="Select Folder")
@@ -107,7 +159,46 @@ class FolderSelectorApp:
             self.selected_folders.pop(index)
             self.listbox.delete(index)
 
+    def update_progress(self, progress, total):
+        percentage = int((progress / total) * 100)
+        self.progress_label.config(text=f"Progress: {percentage}%")
+        self.progress_bar['value'] = percentage
+        self.root.update_idletasks()
+
     def run_analysis(self):
+        if not self.selected_folders:
+            messagebox.showerror("Error", "No folders selected for analysis.")
+            return
+        total_steps = len(self.selected_folders) * 25  # Assuming 25 wafers per folder
+        current_step = 0
+        all_combined_data = []
+        results = []
+        for folder in self.selected_folders:
+            lot = os.path.basename(folder)
+            for i in range(1, 26):
+                wafer_folder = f'CarrierAtPort1/CarrierAtPort1.{i:02d}/{i}'
+                wafer_path = os.path.join(folder, wafer_folder)
+                wafer = f'Wafer_{i}'
+                file_list = sieve(wafer_path, 'Run0001')
+                combined_data = read_txt_files(file_list, lot, wafer)
+                if not combined_data.empty:
+                    all_combined_data.append(combined_data)
+                    std_dev, bow, warp = analyze_data(combined_data)
+                    results.append({
+                        'Lot': lot,
+                        'Wafer': wafer,
+                        'Std Dev': std_dev,
+                        'Bow (µm)': bow,
+                        'Warp (µm)': warp
+                    })
+                current_step += 1
+                self.update_progress(current_step, total_steps)
+        if all_combined_data:
+            all_combined_data_df = pd.concat(all_combined_data, ignore_index=True)
+            save_combined_data(all_combined_data_df)
+        if results:
+            save_results(results)
+        messagebox.showinfo("Analysis Complete", "The analysis is complete.")
         self.root.destroy()
 
 def run_gui():
@@ -115,41 +206,6 @@ def run_gui():
     root.title("Select Folders for Analysis")
     app = FolderSelectorApp(root)
     root.mainloop()
-    return app.selected_folders
-
-# Main Application Logic
-def main():
-    print("Starting application...")
-    selected_folders = run_gui()
-    if not selected_folders:
-        print("No folders selected. Exiting.")
-        return
-    all_combined_data = []
-    results = []
-    for folder in selected_folders:
-        lot = os.path.basename(folder)
-        for i in range(1, 26):
-            wafer_folder = f'CarrierAtPort1/CarrierAtPort1.{i:02d}/{i}'
-            wafer_path = os.path.join(folder, wafer_folder)
-            wafer = f'Wafer_{i}'
-            file_list = sieve(wafer_path, 'Run0001')
-            combined_data = read_txt_files(file_list, lot, wafer)
-            if not combined_data.empty:
-                all_combined_data.append(combined_data)
-                std_dev, bow, warp, points, corrected_values = analyze_data(combined_data)
-                results.append({
-                    'Lot': lot,
-                    'Wafer': wafer,
-                    'Std Dev': std_dev,
-                    'Bow (µm)': bow,
-                    'Warp (µm)': warp
-                })
-    if all_combined_data:
-        all_combined_data_df = pd.concat(all_combined_data, ignore_index=True)
-        save_combined_data(all_combined_data_df, 'combined_data.csv')
-    if results:
-        save_results(results, 'analysis_results.csv')
 
 if __name__ == "__main__":
-    main()
-    input("Press Enter to exit...")
+    run_gui()
