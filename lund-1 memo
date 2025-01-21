@@ -1,0 +1,210 @@
+SKYWATER TECHNOLOGY FOUNDRY INTERNAL CORRESPONDENCE
+
+
+DATE:	12/13/2024
+SUBJECT:	Warpspeed Wafer Analysis Tool: Overview, Functionality, and Compliance with SEMI Standards
+TO:	Andrey Bayrashev, Benjamin Kanevsky 
+AUTHOR:	Timothy Lund
+AUTHOR FILE:	lund-3
+CC	
+Keywords	Warp, Bow, Compile, Automate, MBIR, Engineering, Fab
+
+
+1.	 Purpose and Objective:
+The Warpspeed Wafer Analysis Tool (MBIR_wafer_analysis_tool.py) automates the compiling and analysis of wafer data contained in text files (i.e. Run001) within one or multiple Lot Number folders. It fits a plane to the data, removes it to correct the values, and calculates bow and warp metrics. The tool provides a graphical user interface (GUI) that allows users to select folders, run the analysis, and save the results.
+This application allows for any lot numbers in the 'standard MBIR hierarchy’ to be compiled, assuming the file hierarchy: LNCarrierAtPort1CarrierAtPort1.(Wafer#)Run0001(.txt) 
+ 
+2.	Features
+ 
+1. Data Collection:
+   - Traverse directories to find lot number folders that contain wafer specific (Run0001) files containing wafer data.
+   - Read and combine data from multiple lot numbers/multiple text files.
+
+2. Data Analysis
+   - Fit a plane to the data points and remove it to correct the values.
+   - Calculate statistical metrics such as standard deviation, bow, and warp.
+
+3. File Handling:
+   - Save the combined data and analysis results to CSV and Excel files.
+   - Apply conditional formatting to the results in Excel.                                              
+
+4. Graphical User Interface (GUI):
+•	Select folders for analysis using a user-friendly interface.
+•	Display progress of the analysis.
+•	Provide buttons to add/remove folders, run the analysis, and save results.
+ 
+5. Error Handling and Logging:
+•	Log errors and warnings during file operations and data analysis.
+•	Display error messages to the user through the GUI.
+
+4.	 Wafer Bow and Warp Analysis Using Global Plane Fitting: Compliance with SEMI Standards
+The code calculates bow and warp using a global approach by fitting a least squares plane to the wafer's outer points. The analysis steps are as follows:
+a.	Outer Points Selection: Points with a radius greater than 80 units from the center are selected to represent the wafer's outer regions.
+b.	Plane Fitting: A least squares method fits a plane to the outer points, which is then removed to correct the data.
+c.	Bow Calculation: The bow is calculated as the difference between the mean corrected value and the center value, indicating overall wafer curvature.
+d.	Warp Calculation: The warp is the peak-to-peak range of the corrected values, measuring total surface distortion.
+This method complies with SEMI M1-0601 and SEMI M112-1107 standards for bow and warp measurements in semiconductor wafers. The approach is global, fitting a single plane to the entire wafer surface rather than modeling local variations.
+
+5.	Limitations
+•	Data Format: The code assumes that the text files are named “Run0001” have specific columns (X, Y, Z). If the files do not match this format, they will be skipped.
+•	Error Handling: While there is some error handling, it may not cover all potential issues, such as file read errors or insufficient data points for plane fitting.
+•	Performance: The code processes files sequentially, which may be slow for large datasets or many folders.
+ 
+6.	Potential Improvements
+a.	 Configuration Management: 
+•	Improve the file handling and data reading to handle file and folder structures that are outside of the current framework (i.e. Run0002, etc.). 
+•	Add feature to select multiple files without reopening the add file screen (control+click).
+
+b.	 Performance Optimization:
+•	Process files sequentially, with potential for parallel processing to speed up the analysis of large datasets.
+•	Enhanced Error Handling and Logging: Add more comprehensive error and logging handling to manage various potential issues during file operations and data analysis.
+
+ Contact Timothy.Lund@skywatertechnology for bugs or reconfiguration
+
+
+  
+Python Script  Process Overview:
+(See MBIR_wafer_analysis_tool.py for full code) 
+
+1. File Handling and Data Reading:
+ - sieve function: Searches for files matching a pattern in each directory.
+ 
+ def sieve(topfolder: str, pattern: str) -> list:
+ all_files = []
+ for base, _, files in os.walk(topfolder):
+ txtfiles = filter(lambda x: re.search(pattern, x), files)
+ all_files += [os.path.join(base, eachtxt) for eachtxt in txtfiles]
+ return all_files
+ 
+ - read_txt_files function: Reads data from these files, ensuring they contain
+the required columns ('X', 'Y', 'Z')
+ and appends the data to a list.
+ 
+ def read_txt_files(file_list, lot, wafer):
+ data_list = []
+ for file_path in file_list:
+ if 'ReferenceChipSingleBeam' not in file_path and
+file_path.endswith('.txt'):
+ try:
+ data = pd.read_csv(file_path, delimiter=',', header=0,
+skipinitialspace=True)
+ if all(col in data.columns for col in ['X', 'Y', 'Z']):
+ subset = data[['X', 'Y', 'Z']].copy()
+ subset['Lot'] = lot
+ subset['Wafer'] = wafer
+ data_list.append(subset)
+ else:
+ logging.warning(f"File {file_path} does not have required
+columns ['X', 'Y', 'Z'].")
+ except Exception as e:
+ logging.error(f"Error reading {file_path}: {e}")
+ return pd.concat(data_list, ignore_index=True) if data_list else
+pd.DataFrame()
+ 
+ 
+2. Data Analysis:
+ - analyze data function: Processes the data by fitting a plane to the outer
+points, removing the plane from
+ the data, and calculating the standard deviation, bow, and warp of the
+corrected values.
+ 
+ def analyze_data(data):
+ if data.empty:
+ return None
+ points = data[['X', 'Y']].values
+ values = data['Z'].values
+ coefficients = fit_plane(points, values)
+ corrected_values = remove_plane(points, values, coefficients)
+ std_dev = np.std(values)
+ bow, warp = calculate_bow_warp(points, corrected_values)
+ return std_dev, bow, warp
+ 
+3. Saving Data:
+ - save_combined_data function: Saves the combined data from all files into a
+CSV file.
+ 
+ def save_combined_data(data):
+ filename = filedialog.asksaveasfilename(title="Save Combined Data",
+defaultextension=".csv",
+ filetypes=[("CSV Files", "*.csv")])
+ if filename:
+ data.to_csv(filename, index=False, encoding='utf-8-sig')
+ logging.info(f"Combined data saved as {filename}")
+ 
+ - save_results function: Saves the analysis results into an Excel file with
+conditional formatting applied
+ to the 'Bow (µm)' and 'Warp (µm)' columns.
+ 
+4. GUI for Folder Selection:
+ 
+ - FolderSelectorApp class: Provides a GUI for selecting multiple folders,
+adding/removing folders, and
+ running the analysis.
+ 
+ class FolderSelectorApp:
+ def __init__(self, root):
+ self.root = root
+ self.selected_folders = []
+ self.create_widgets()
+ 
+ - run_analysis method: Processes each selected folder, reads and analyzes
+the data, updates the progress
+ bar, and saves the results.
+ 
+5. Main Function:
+ - run_gui function: Initializes and runs the GUI application.
+ def run_gui():
+ root = tk.Tk()
+ root.title("Select Folders for Analysis")
+ app = FolderSelectorApp(root)
+ root.mainloop()
+ 
+Libraries Used:
+- pandas: For data manipulation.
+- numpy: For numerical operations.
+- tkinter: For the GUI.
+- openpyxl: For Excel file handling.
+- logging: For logging messages.
+ 
+Detailed Steps in analyze_data Function:
+ 
+1. Check for Empty Data:
+ - If the input data is empty, the function returns None.
+ 
+2. Extract Points and Values:
+ - Extracts the X and Y coordinates into a points array and the Z values into a
+values array.
+ 
+3. Fit a Plane:
+ - Calls the fit_plane function with the points and values to fit a plane to the
+outer points of the wafer.
+ This function returns the coefficients of the fitted plane.
+ 
+4. Remove the Plane:
+ - Calls the remove_plane function with the points, values, and the plane
+coefficients to remove the plane
+ from the Z values, resulting in corrected_values.
+ 
+5. Calculate Standard Deviation:
+ - Calculates the standard deviation of the original Z values using numpy's
+np.std function.
+ 
+6. Calculate Bow and Warp:
+ - Calls the calculate_bow_warp function with the points and corrected_values
+to calculate the bow and
+ warp of the wafer.
+ 
+7. Return Results:
+ - Returns the standard deviation, bow, and warp as a tuple.
+ 
+ def analyze_data(data):
+ if data.empty:
+ return None
+ points = data[['X', 'Y']].values
+ values = data['Z'].values
+ coefficients = fit_plane(points, values)
+ corrected_values = remove_plane(points, values, coefficients)
+ std_dev = np.std(values)
+ bow, warp = calculate_bow_warp(points, corrected_values)
+ return std_dev, bow, warp
+
